@@ -32,7 +32,17 @@ import json
 import sys
 import urllib.request
 
-WORDFENCE_URL = "https://www.wordfence.com/api/intelligence/v2/vulnerabilities/production"
+WORDFENCE_URL = "https://www.wordfence.com/api/intelligence/v3/vulnerabilities/production"
+
+
+def _num(x):
+    """Best-effort float, else None (CVSS score may be number, string, or absent)."""
+    if x in (None, ""):
+        return None
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
 
 
 def vkey(v):
@@ -87,9 +97,21 @@ def range_fixed(rng, patched_versions):
 
 
 def parse_wordfence(data):
-    """Yield feed records from the Wordfence Intelligence production feed."""
+    """Yield feed records from the Wordfence Intelligence production feed.
+
+    Tolerant of shape: the feed may be an object keyed by UUID, a bare list,
+    or wrapped under a "data"/"vulnerabilities" key. Per-record it accepts the
+    documented v2/v3 fields and skips (never crashes on) anything odd.
+    """
+    if isinstance(data, dict) and "slug" not in data:
+        for wrap in ("data", "vulnerabilities", "results"):
+            if isinstance(data.get(wrap), (dict, list)):
+                data = data[wrap]
+                break
     items = data.values() if isinstance(data, dict) else data
     for v in items:
+        if not isinstance(v, dict):
+            continue
         cve = None
         cve_field = v.get("cve")
         if isinstance(cve_field, str):
@@ -103,11 +125,27 @@ def parse_wordfence(data):
                     cve = c["id"]
                     break
 
-        cvss_obj = v.get("cvss") or {}
-        score = cvss_obj.get("score")
-        sev = severity_from_cvss(score, cvss_obj.get("rating"))
-        refs = v.get("references") or []
-        ref = refs[0] if refs else (f"https://nvd.nist.gov/vuln/detail/{cve}" if cve else "")
+        cvss_obj = v.get("cvss")
+        if isinstance(cvss_obj, dict):
+            score = cvss_obj.get("score")
+            rating = cvss_obj.get("rating")
+        elif isinstance(cvss_obj, (int, float, str)):
+            score, rating = cvss_obj, None
+        else:
+            score, rating = None, None
+        sev = severity_from_cvss(score, rating)
+
+        ref = ""
+        for item in (v.get("references") or []):
+            if isinstance(item, str) and item:
+                ref = item
+                break
+            if isinstance(item, dict):
+                ref = item.get("url") or item.get("link") or ""
+                if ref:
+                    break
+        if not ref:
+            ref = f"https://nvd.nist.gov/vuln/detail/{cve}" if cve else ""
         published = (v.get("published") or "")[:10]
         title = v.get("title") or ""
 
@@ -118,9 +156,15 @@ def parse_wordfence(data):
             slug = sw.get("slug")
             if not slug:
                 continue
-            patched = sw.get("patched_versions") or []
+            pv = sw.get("patched_versions")
+            patched = list(pv.values()) if isinstance(pv, dict) else (pv or [])
+            patched = [str(p) for p in patched if p]
+            av = sw.get("affected_versions") or {}
+            av_items = av.values() if isinstance(av, dict) else (av if isinstance(av, list) else [])
             affected = []
-            for rng in (sw.get("affected_versions") or {}).values():
+            for rng in av_items:
+                if not isinstance(rng, dict):
+                    continue
                 frm = rng.get("from_version")
                 introduced = "0" if frm in (None, "", "*") else frm
                 affected.append({"introduced": introduced, "fixed": range_fixed(rng, patched)})
@@ -140,7 +184,7 @@ def parse_wordfence(data):
                 "cve": cve,
                 "title": title[:255],
                 "severity": sev,
-                "cvss": float(score) if score not in (None, "") else None,
+                "cvss": _num(score),
                 "affected": affected,
                 "fixed_in": fixed_in,
                 "reference": ref[:255],
@@ -169,6 +213,14 @@ def main():
         data = fetch(args.url)
 
     records = list(parse_wordfence(data))
+    if not records:
+        sys.exit(
+            "ERROR: parsed 0 vulnerability records. The source responded but its\n"
+            "shape wasn't recognised (the feed format may have changed). Save the\n"
+            "raw response and inspect it:\n"
+            f"    curl -s '{args.url}' | head -c 2000\n"
+            "then share the first record's field names so the parser can be updated."
+        )
     # Stable, de-duplicated by (type, slug, id).
     seen, uniq = set(), []
     for rec in records:
