@@ -30,6 +30,8 @@ jobs:
           python-version: "3.12"
 
       - name: Build feed
+        env:
+          WORDFENCE_API_KEY: ${{ secrets.WORDFENCE_API_KEY }}
         run: |
           python3 tools/build-feed.py --out wp-vulnerabilities.ndjson
           gzip -9 -k wp-vulnerabilities.ndjson      # also publish a .gz
