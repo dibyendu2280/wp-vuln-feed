@@ -29,7 +29,9 @@ The first line is feed metadata: {"format","built_at","count","source"}.
 import argparse
 import datetime
 import json
+import os
 import sys
+import urllib.error
 import urllib.request
 
 WORDFENCE_URL = "https://www.wordfence.com/api/intelligence/v3/vulnerabilities/production"
@@ -192,10 +194,24 @@ def parse_wordfence(data):
             }
 
 
-def fetch(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "signupsentry-feed-builder"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return json.load(r)
+def fetch(url, api_key=None):
+    headers = {"User-Agent": "signupsentry-feed-builder"}
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            sys.exit(
+                f"ERROR: the feed rejected the request ({e.code}). The Wordfence v3 feed\n"
+                "requires an API key. Set it in the WORDFENCE_API_KEY environment variable\n"
+                "(in CI, add it as a repository secret — never commit the key)."
+            )
+        if e.code == 410:
+            sys.exit(f"ERROR: {url} is gone (410). The endpoint version likely changed.")
+        raise
 
 
 def main():
@@ -204,13 +220,21 @@ def main():
     ap.add_argument("--url", default=WORDFENCE_URL, help="source feed URL")
     ap.add_argument("--out", default="wp-vulnerabilities.ndjson", help="output NDJSON path")
     ap.add_argument("--source", default="wordfence", help="label stored in feed meta")
+    ap.add_argument("--key", default=None, help="API key (prefer the WORDFENCE_API_KEY env var; a CLI key is visible in the process list)")
     args = ap.parse_args()
 
     if args.infile:
         with open(args.infile, "r", encoding="utf-8") as fh:
             data = json.load(fh)
     else:
-        data = fetch(args.url)
+        api_key = args.key or os.environ.get("WORDFENCE_API_KEY")
+        if not api_key:
+            sys.exit(
+                "ERROR: no API key. The Wordfence v3 feed requires one.\n"
+                "Set WORDFENCE_API_KEY in the environment (a GitHub Actions secret in CI),\n"
+                "or pass --key for a local test run."
+            )
+        data = fetch(args.url, api_key)
 
     records = list(parse_wordfence(data))
     if not records:
