@@ -1,0 +1,49 @@
+# SignupSentry vulnerability-feed pipeline.
+#
+# Copy this into the feed repo (e.g. dibyendu2280/wp-vuln-feed) at
+# .github/workflows/build-feed.yml. It rebuilds the NDJSON feed daily from a
+# public source and (re)publishes it as the `vuln-latest` release asset that
+# the plugin downloads — the same delivery model as the VPN DB. No site data
+# is ever involved; this only transforms a public vulnerability feed.
+#
+# The plugin's default feed URL is:
+#   https://github.com/<owner>/<repo>/releases/download/vuln-latest/wp-vulnerabilities.ndjson
+
+name: Build vulnerability feed
+
+on:
+  schedule:
+    - cron: "17 4 * * *"   # daily, 04:17 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build feed
+        env:
+          WORDFENCE_API_KEY: ${{ secrets.WORDFENCE_API_KEY }}
+        run: |
+          python3 tools/build-feed.py --out wp-vulnerabilities.ndjson
+          gzip -9 -k wp-vulnerabilities.ndjson      # also publish a .gz
+          wc -l wp-vulnerabilities.ndjson
+
+      - name: Publish release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: vuln-latest
+          name: Latest vulnerability feed
+          files: |
+            wp-vulnerabilities.ndjson
+            wp-vulnerabilities.ndjson.gz
+          # Overwrite the moving `vuln-latest` tag each run.
+          make_latest: false
