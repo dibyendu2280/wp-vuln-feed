@@ -1,0 +1,62 @@
+# SignupSentry firewall rule-feed pipeline.
+#
+# Copy into the feed repo (dibyendu2280/wp-vuln-feed) at
+# .github/workflows/build-fw-feed.yml. It assembles the firewall rules from
+# rules/*.ndjson, validates every pattern in BOTH Python and PHP (PHP is the
+# engine the plugin uses), and publishes the result to the `fw-latest` release
+# that the plugin downloads. No API key needed — the rules are your own.
+#
+# Repo layout expected:
+#   rules/firewall-rules.ndjson        <- hand-authored rule source(s)
+#   tools/build-fw-feed.py
+#   tools/validate-fw.php
+#   .github/workflows/build-fw-feed.yml
+#
+# Plugin default feed URL:
+#   https://github.com/dibyendu2280/wp-vuln-feed/releases/download/fw-latest/firewall-rules.ndjson
+
+name: Build firewall rules
+
+on:
+  push:
+    paths:
+      - "rules/**"
+      - "tools/build-fw-feed.py"
+      - "tools/validate-fw.php"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+
+      - name: Assemble feed
+        run: python3 tools/build-fw-feed.py --src rules --out firewall-rules.ndjson
+
+      - name: Validate patterns (PCRE / PHP — authoritative)
+        run: php tools/validate-fw.php firewall-rules.ndjson
+
+      - name: Compress
+        run: gzip -9 -k firewall-rules.ndjson
+
+      - name: Publish release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: fw-latest
+          name: Latest firewall rules
+          files: |
+            firewall-rules.ndjson
+            firewall-rules.ndjson.gz
+          make_latest: false
